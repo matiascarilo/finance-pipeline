@@ -7,10 +7,10 @@ const LOGO_B64 = "data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BS
 const APP_PASSWORD = "CariloMat123@";
 
 const NOTION_DATABASES = {
-  leader:  { id: "collection://3019f29d-8033-80cc-b149-000be988eaf7", label: "Leader",       type: "income",  color: "#fff" },
-  spinoff: { id: "collection://3019f29d-8033-81ea-a3bf-000b5b8081f1", label: "Spin-off",     type: "income",  color: "#ccc" },
-  other:   { id: "collection://3019f29d-8033-8122-b9be-000b5b1e6c4c", label: "Other Income",  type: "income",  color: "#aaa" },
-  vendors: { id: "collection://3019f29d-8033-817e-bd2e-000b6a3c7e74", label: "Vendors",       type: "expense", color: "#888" },
+  leader:  { id: "3019f29d8033805bbaadd25454355cd9", label: "Leader",       type: "income",  color: "#fff" },
+  spinoff: { id: "3019f29d803380c4b774f91dbe9c7a2d", label: "Spin-off",     type: "income",  color: "#ccc" },
+  other:   { id: "3019f29d803380429365c64237895e18", label: "Other Income",  type: "income",  color: "#aaa" },
+  vendors: { id: "3019f29d8033806e982dec4d4a133846", label: "Vendors",       type: "expense", color: "#888" },
 };
 
 const STATUS_OPTIONS = ["Not started", "Working On it", "Requestd", "Payed"];
@@ -27,19 +27,99 @@ const fmt     = (n) => new Intl.NumberFormat("en-US",{style:"currency",currency:
 const fmtDate = (d) => { if(!d) return "—"; try { return new Date(d).toLocaleDateString("es-ES",{day:"2-digit",month:"short",year:"numeric"}); } catch { return d; } };
 const pctFmt  = (n) => `${Number(n).toFixed(2).replace(/\.?0+$/,"")}%`;
 
-async function callClaude(prompt) {
-  const apiKey = process.env.REACT_APP_ANTHROPIC_KEY;
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method:"POST",
-    headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01"},
-    body:JSON.stringify({
-      model:"claude-sonnet-4-20250514", max_tokens:1000,
-      system:`You are a Notion finance assistant. Respond ONLY in valid JSON, no markdown, no preamble.`,
-      messages:[{role:"user",content:prompt}],
-      mcp_servers:[{type:"url",url:"https://mcp.notion.com/mcp",name:"notion-mcp"}],
+// ─── Notion API via Vercel proxy (avoids CORS) ───────────────────────────────
+const PROXY = "/api/notion";
+
+async function notionQuery(dbId, filter, cursor) {
+  const body = { page_size: 100 };
+  if (filter) body.filter = filter;
+  if (cursor) body.start_cursor = cursor;
+  const res = await fetch(`${PROXY}/databases/${dbId}/query`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return res.json();
+}
+
+async function notionPatch(pageId, props) {
+  const res = await fetch(`${PROXY}/pages/${pageId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ properties: props }),
+  });
+  return res.json();
+}
+
+async function notionCreate(dbId, props) {
+  const res = await fetch(`${PROXY}/pages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      parent: { database_id: dbId },
+      properties: props,
     }),
   });
   return res.json();
+}
+
+// Parse a Notion page into our entry format
+function parseNotionPage(page, category) {
+  const p = page.properties || {};
+  const getTitle  = (k) => p[k]?.title?.[0]?.plain_text || "";
+  const getNumber = (k) => p[k]?.number || 0;
+  const getText   = (k) => p[k]?.rich_text?.[0]?.plain_text || "";
+  const getSelect = (k) => p[k]?.select?.name || p[k]?.status?.name || "";
+  const getDate   = (k) => p[k]?.date?.start || "";
+
+  return {
+    id: page.id,
+    budget: getTitle("Budget") || getTitle("Name"),
+    amount: getNumber("Amount"),
+    businessUnit: getSelect("Business Unit"),
+    expectedDate: getDate("Expected Date"),
+    notes: getText("Notes") || getText("details"),
+    status: getSelect("status"),
+    category,
+  };
+}
+
+// Build Notion properties object for create/update
+function buildNotionProps(entry) {
+  const props = {};
+  if (entry.budget !== undefined)
+    props["Budget"] = { title: [{ text: { content: entry.budget } }] };
+  if (entry.amount !== undefined)
+    props["Amount"] = { number: entry.amount };
+  if (entry.status !== undefined)
+    props["status"] = { status: { name: entry.status } };
+  if (entry.notes !== undefined)
+    props["Notes"] = { rich_text: [{ text: { content: entry.notes } }] };
+  if (entry.businessUnit)
+    props["Business Unit"] = { select: { name: entry.businessUnit } };
+  if (entry.expectedDate)
+    props["Expected Date"] = { date: { start: entry.expectedDate } };
+  return props;
+}
+
+// Load all entries from all 4 databases
+async function loadAllEntries() {
+  const cats = Object.entries(NOTION_DATABASES);
+  const allEntries = [];
+  for (const [cat, db] of cats) {
+    try {
+      let hasMore = true, cursor = undefined;
+      while (hasMore) {
+        const data = await notionQuery(db.id, null, cursor);
+        if (data.results) {
+          data.results.forEach(p => allEntries.push(parseNotionPage(p, cat)));
+        }
+        hasMore = data.has_more || false;
+        cursor = data.next_cursor;
+      }
+    } catch(e) { console.error("Error loading", cat, e); }
+  }
+  return allEntries;
 }
 
 // ─── UI Primitives ─────────────────────────────────────────────────────────
@@ -337,10 +417,9 @@ function PipelineSection({notify}) {
   const load=useCallback(async()=>{
     setLoading(true);setLoadMsg("Conectando con Notion...");
     try{
-      const data=await callClaude(`Fetch all pages from: collection://3019f29d-8033-80cc-b149-000be988eaf7, collection://3019f29d-8033-81ea-a3bf-000b5b8081f1, collection://3019f29d-8033-8122-b9be-000b5b1e6c4c, collection://3019f29d-8033-817e-bd2e-000b6a3c7e74. Return JSON array: [{"id":"...","budget":"...","amount":0,"businessUnit":"...","expectedDate":"YYYY-MM-DD","notes":"...","status":"...","category":"leader|spinoff|other|vendors"}]`);
-      const text=data.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"";
-      const m=text.match(/\[[\s\S]*\]/);
-      if(m){try{setEntries(JSON.parse(m[0]));}catch{}}
+      setLoadMsg("Cargando pipeline...");
+      const entries = await loadAllEntries();
+      setEntries(entries);
       notify("Datos actualizados");
     }catch(e){notify(e.message,"error");}
     setLoading(false);setLoadMsg("");
@@ -349,8 +428,10 @@ function PipelineSection({notify}) {
   const updateStatus=async(entry,status)=>{
     const prev=[...entries];
     setEntries(es=>es.map(e=>e.id===entry.id?{...e,status}:e));
-    try{await callClaude(`Update Notion page "${entry.id}" set status="${status}". notion-update-page update_properties. Return {"success":true}`);notify(`Estado → ${status}`);}
-    catch{setEntries(prev);notify("Error","error");}
+    try{
+      await notionPatch(entry.id, { status: { status: { name: status } } });
+      notify(`Estado → ${status}`);
+    }catch{setEntries(prev);notify("Error","error");}
   };
 
   const addEntry=async()=>{
@@ -359,13 +440,20 @@ function PipelineSection({notify}) {
     try{
       const db=NOTION_DATABASES[newEntry.category];
       const amt=parseFloat(newEntry.amount)||0;
-      const props={Budget:newEntry.budget,Amount:amt,status:newEntry.status,Notes:newEntry.notes||""};
-      if(newEntry.expectedDate){props["date:Expected Date:start"]=newEntry.expectedDate;props["date:Expected Date:is_datetime"]=0;}
-      await callClaude(`Create page in "${db.id.replace("collection://","")}" with: ${JSON.stringify(props)}. Return {"success":true}`);
-      setEntries(es=>[...es,{id:"tmp-"+Date.now(),...newEntry,amount:amt}]);
+      const props = buildNotionProps({
+        budget: newEntry.budget,
+        amount: amt,
+        status: newEntry.status,
+        notes: newEntry.notes||"",
+        businessUnit: newEntry.businessUnit,
+        expectedDate: newEntry.expectedDate||undefined,
+      });
+      const page = await notionCreate(db.id, props);
+      const newEnt = { id: page.id||"tmp-"+Date.now(), ...newEntry, amount: amt };
+      setEntries(es=>[...es, newEnt]);
       setShowAdd(false);
       setNewEntry({budget:"",amount:"",businessUnit:"Leader",expectedDate:"",notes:"",status:"Not started",category:"leader"});
-      notify("Guardado");
+      notify("Guardado en Notion");
     }catch(e){notify(e.message,"error");}
     setLoading(false);setLoadMsg("");
   };
@@ -374,9 +462,14 @@ function PipelineSection({notify}) {
     const prev=[...entries];
     setEntries(es=>es.map(e=>e.id===editing.id?editing:e));setEditing(null);
     try{
-      const p={Budget:editing.budget,status:editing.status,Notes:editing.notes||"",Amount:editing.amount};
-      if(editing.expectedDate){p["date:Expected Date:start"]=editing.expectedDate.slice(0,10);p["date:Expected Date:is_datetime"]=0;}
-      await callClaude(`Update Notion page "${editing.id}" with: ${JSON.stringify(p)}. Return {"success":true}`);
+      const props = buildNotionProps({
+        budget: editing.budget,
+        amount: editing.amount,
+        status: editing.status,
+        notes: editing.notes||"",
+        expectedDate: editing.expectedDate?editing.expectedDate.slice(0,10):undefined,
+      });
+      await notionPatch(editing.id, props);
       notify("Cambios guardados");
     }catch{setEntries(prev);notify("Error","error");}
   };
