@@ -1,9 +1,8 @@
 {
-  "rewrites": [
-    {
-      "source": "/api/notion/:path*",
-      "destination": "/api/notion?path=:path*"
+  "functions": {
+    "api/notion.js": {
+      "memory": 128,
+      "maxDuration": 10
     }
-  ]
+  }
 }
-
