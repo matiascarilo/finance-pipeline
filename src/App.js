@@ -28,39 +28,36 @@ const fmtDate = (d) => { if(!d) return "—"; try { return new Date(d).toLocaleD
 const pctFmt  = (n) => `${Number(n).toFixed(2).replace(/\.?0+$/,"")}%`;
 
 // ─── Notion API via Vercel proxy (avoids CORS) ───────────────────────────────
-const PROXY = "/api/notion";
+// Uses query param ?path= to avoid Vercel routing conflicts
+async function notionCall(method, path, body) {
+  const res = await fetch(`/api/notion?path=${encodeURIComponent(path)}`, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Notion ${res.status}: ${txt}`);
+  }
+  return res.json();
+}
 
 async function notionQuery(dbId, filter, cursor) {
   const body = { page_size: 100 };
   if (filter) body.filter = filter;
   if (cursor) body.start_cursor = cursor;
-  const res = await fetch(`${PROXY}/databases/${dbId}/query`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return res.json();
+  return notionCall("POST", `databases/${dbId}/query`, body);
 }
 
 async function notionPatch(pageId, props) {
-  const res = await fetch(`${PROXY}/pages/${pageId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ properties: props }),
-  });
-  return res.json();
+  return notionCall("PATCH", `pages/${pageId}`, { properties: props });
 }
 
 async function notionCreate(dbId, props) {
-  const res = await fetch(`${PROXY}/pages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      parent: { database_id: dbId },
-      properties: props,
-    }),
+  return notionCall("POST", "pages", {
+    parent: { database_id: dbId },
+    properties: props,
   });
-  return res.json();
 }
 
 // Parse a Notion page into our entry format
