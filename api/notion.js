@@ -1,4 +1,3 @@
-// Vercel serverless function — proxies requests to Notion API
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS");
@@ -9,10 +8,7 @@ export default async function handler(req, res) {
   const { path } = req.query;
   if (!path) return res.status(400).json({ error: "Missing path" });
 
-  const pathStr = Array.isArray(path) ? path.join("/") : path;
-  const notionUrl = `https://api.notion.com/v1/${pathStr}`;
-
-  console.log("Proxying to:", notionUrl, "method:", req.method);
+  const notionUrl = `https://api.notion.com/v1/${path}`;
 
   try {
     const notionRes = await fetch(notionUrl, {
@@ -24,11 +20,9 @@ export default async function handler(req, res) {
       },
       body: ["POST","PATCH"].includes(req.method) ? JSON.stringify(req.body) : undefined,
     });
-
     const data = await notionRes.json();
     return res.status(notionRes.status).json(data);
   } catch (err) {
-    console.error("Proxy error:", err);
     return res.status(500).json({ error: err.message });
   }
 }
